@@ -2,7 +2,7 @@
 
 **Scientific data paper: “Annual 10 m Suaeda salsa distribution dataset in Liaoning Province, China, from 2019 to 2025”**
 
-**Abstract**
+**Abstract**wfwef
 
 Coastal salt marshes are essential for ecosystem stability and biodiversity conservation. *Suaeda salsa*, as a typical pioneer species, plays an important role in salinity regulation and carbon sequestration. Liaoning Province represents a major distribution region of *Suaeda salsa* in China and is characterized by high carbon emissions from heavy industry. Therefore, monitoring its spatiotemporal distribution is important for ecological conservation in Liaoning Province.
 
