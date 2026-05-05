@@ -14,8 +14,8 @@ import gc
 # ======================= 配置参数 =======================
 CONFIG = {
     'year': 2025,
-    'msi_base_path': r'F:\25GT',
-    'sar_base_path': r'F:\25GT',
+    'msi_base_path': r'F:\MSI',
+    'sar_base_path': r'F:\SAR',
     'msi_pattern': '{season}{year}_MSI.tif',
     'sar_pattern': '{season}{year}_SAR.tif',
     'train_label_path': r'F:\train.tif',
@@ -211,52 +211,72 @@ with rasterio.open(out_paths['all'], 'w', **meta_out) as dst_all, \
                     dst.write(np.zeros((rsz, csz), dtype=np.uint8), 1, window=win)
                 continue
 
-            feats_list = []
             rows_v, cols_v = np.where(mask)
-            for r, c in zip(rows_v, cols_v):
-                pix = []
-                valid = True
-                for s in SEASONS:
-                    m = src_dict[s]['msi'].read(window=Window(col + c, row + r, 1, 1))[:, 0, 0]
-                    sw = sar_windows[s]
-                    sar = src_dict[s]['sar'].read(window=Window(sw.col_off + col + c, sw.row_off + row + r, 1, 1))[:, 0,
-                          0]
-                    if np.any(np.isnan(m)) or np.any(np.isinf(m)) or np.any(m == 0):
-                        valid = False;
-                        break
-                    if np.any(np.isnan(sar)) or np.any(np.isinf(sar)) or np.any(sar == 0):
-                        valid = False;
-                        break
-                    pix.extend(m.tolist() + sar.tolist())
-                if valid:
-                    feats_list.append(pix)
+            n_valid = len(rows_v)
 
-            if not feats_list:
-                for dst in [dst_all, dst_conf] + list(dst_cls.values()):
-                    dst.write(np.zeros((rsz, csz), dtype=np.uint8), 1, window=win)
-                continue
+            # ====== 优化点1：批量读取整块影像 ======
+            # 一次性读取当前块的所有波段数据，而不是逐像素读
+            msi_blocks = {}
+            sar_blocks = {}
+            for s in SEASONS:
+                # 读取MSI整块 (所有波段)
+                msi_blocks[s] = src_dict[s]['msi'].read(window=win)  # shape: (bands, rsz, csz)
+                # 读取SAR整块
+                sw = sar_windows[s]
+                sar_win = Window(sw.col_off + col, sw.row_off + row, csz, rsz)
+                sar_blocks[s] = src_dict[s]['sar'].read(window=sar_win)  # shape: (2, rsz, csz)
 
-            feats_arr = np.array(feats_list)
-            preds = clf.predict(feats_arr)
-            confs = np.max(clf.predict_proba(feats_arr), axis=1)
+            # ====== 优化点2：矢量化构建特征矩阵 ======
+            # 预分配特征矩阵 (n_valid, n_features)
+            n_msi_bands = msi_blocks[SEASONS[0]].shape[0]
+            n_sar_bands = sar_blocks[SEASONS[0]].shape[0]
+            feats_per_season = n_msi_bands + n_sar_bands
+            n_features = len(SEASONS) * feats_per_season
+            feats_arr = np.zeros((n_valid, n_features), dtype=np.float32)
 
+            for si, s in enumerate(SEASONS):
+                start_idx = si * feats_per_season
+                # MSI波段：从整块中提取对应像素
+                for bi in range(n_msi_bands):
+                    feats_arr[:, start_idx + bi] = msi_blocks[s][bi, rows_v, cols_v]
+                # SAR波段
+                for bi in range(n_sar_bands):
+                    feats_arr[:, start_idx + n_msi_bands + bi] = sar_blocks[s][bi, rows_v, cols_v]
+
+            # ====== 优化点3：矢量化无效值检测 ======
+            invalid_mask = (
+                np.any(np.isnan(feats_arr), axis=1) |
+                np.any(np.isinf(feats_arr), axis=1) |
+                np.any(feats_arr == 0, axis=1)
+            )
+
+            # ====== 优化点4：只对有效像素预测 ======
+            valid_idx = np.where(~invalid_mask)[0]
             cls_map = np.zeros((rsz, csz), dtype=np.uint8)
             conf_map = np.full((rsz, csz), -9999, np.float32)
-            for i, (r, c) in enumerate(zip(rows_v, cols_v)):
-                if i < len(preds):
-                    cls_map[r, c] = preds[i]
-                    conf_map[r, c] = confs[i]
 
+            if len(valid_idx) > 0:
+                valid_feats = feats_arr[valid_idx]
+                preds = clf.predict(valid_feats)
+                confs = np.max(clf.predict_proba(valid_feats), axis=1)
+
+                # 回填到结果图
+                r_valid = rows_v[valid_idx]
+                c_valid = cols_v[valid_idx]
+                cls_map[r_valid, c_valid] = preds
+                conf_map[r_valid, c_valid] = confs
+
+            # 写入输出文件
             dst_all.write(cls_map, 1, window=win)
             dst_conf.write(conf_map, 1, window=win)
-            for c in range(1, 6):
-                dst_cls[c].write((cls_map == c).astype(np.uint8), 1, window=win)
+            for cc in range(1, 6):
+                dst_cls[cc].write((cls_map == cc).astype(np.uint8), 1, window=win)
 
     for dst in dst_cls.values():
         dst.close()
 
 for s in SEASONS:
-    src_dict[s]['msi'].close();
+    src_dict[s]['msi'].close()
     src_dict[s]['sar'].close()
 
 print('完成')
